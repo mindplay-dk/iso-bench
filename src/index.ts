@@ -77,6 +77,7 @@ class Test {
     log:any[] = [];
     cycles = 100;
     totalTime = 0;
+    values: number[] = [];
     opMs = -1;
     samples = 0;
     constructor(readonly name:string, readonly callback:()=>void) {}
@@ -86,6 +87,14 @@ export const enum STRINGS {
     BEST = "BEST",
     COMPLETED = "[TESTS COMPLETED]"
 };
+
+function sum(values: number[]): number {
+    let total = 0;
+    for (const value of values) {
+        total += value;
+    }
+    return total;
+}
 
 let IDs = 0;
 const BENCHES = new Map<string, IsoBench>();
@@ -119,7 +128,7 @@ export class IsoBench {
         this._logs.push(args);
         return this;
     }
-    async run() {
+    async run(): Promise<Test[]> {
         if (isMaster) {
             for (const log of this._logs) {
                 console.log(...log);
@@ -140,11 +149,13 @@ export class IsoBench {
             }
             this._output(tests);
             console.log(STRINGS.COMPLETED);
+            return tests;
         } else {
             this._ready = true;
             if (setup) {
                 this._start(setup);
             }
+            return [];
         }
     }
     private _start(setup:SetupMessage) {
@@ -164,7 +175,7 @@ export class IsoBench {
                     throw new Error("Test '" + setup.testName + "' not found");
                 }
                 send(writeStream, {
-                    diff: this._runTest(test, setup.cycles)
+                    values: this._runTest(test, setup.cycles)
                 });
             } catch (e) {
                 send(writeStream, {
@@ -189,25 +200,28 @@ export class IsoBench {
             console.log(...test.log);
         }
     }
-    private _runTest(test:Test, cycles:number) {
-        const startTS = process.hrtime.bigint();
+    private _runTest(test:Test, cycles:number): number[] {
+        const values: number[] = [];
         while(cycles-- > 0) {
+            const startTS = process.hrtime.bigint();
             test.callback();
+            values.push(Number(process.hrtime.bigint() - startTS) / 1000000);
         }
-        return Number(process.hrtime.bigint() - startTS) / 1000000;
+        return values;
     }
     private _newWorker(test:Test) {
         return new Promise<void>((resolve => {
             let ended = false;
             const worker = cluster.fork();
-            const done = (error?:string, diff?:number) => {
+            const done = (error?:string, values?:number[]) => {
                 if (!ended) {
                     ended = true;
                     if (error) {
                         test.opMs = 0;
                         test.error = error;
                         resolve();
-                    } else if (diff) {
+                    } else if (values) {
+                        const diff = sum(values)
                         if (diff < this.options.minMs) {
                             const ratio = this.options.minMs / diff;
                             test.cycles = Math.round(test.cycles * (ratio || this.options.minMs));
@@ -217,6 +231,7 @@ export class IsoBench {
                             const ops = test.cycles / diff;
                             test.opMs = test.opMs < 0 ? ops : (test.opMs + ops) / 2;
                             test.totalTime += diff;
+                            test.values.push(...values);
                             if (test.totalTime >= this.options.ms) {
                                 resolve();
                             } else {
@@ -227,7 +242,7 @@ export class IsoBench {
                 }
             };
             onRead(worker.process.stdio[3]! as STREAM.Readable, (message:any) => {
-                done(message.error, message.diff);
+                done(message.error, message.values);
             });
             const setup:SetupMessage = {
                 testName: test.name,
